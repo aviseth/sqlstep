@@ -71,9 +71,17 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    # The environment gates this on a human approval and on the ref being a tag.
     environment: pypi
     permissions:
+      # Trusted publishing: a short-lived OIDC credential scoped to this repo,
+      # this workflow and this environment. No stored token to leak, and it is
+      # what lets the action attach PEP 740 provenance attestations, which an
+      # API token cannot produce.
       id-token: write
+      # Needed by the action to sign the attestations.
+      attestations: write
+      contents: read
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
