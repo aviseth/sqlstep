@@ -34,7 +34,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
-      - run: uv sync
+        with:
+          # No cache anywhere in the release path.
+          enable-cache: false
+      # --locked: fail rather than quietly re-resolve if pyproject.toml and
+      # uv.lock disagree. A release should install what was tested.
+      - run: uv sync --locked
       - run: uv run pytest -q
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -63,6 +68,14 @@ jobs:
             exit 1
           fi
       - run: uv build
+      - name: the wheel that gets uploaded has to install and run on its own
+        # uv sync installs from the checkout in editable mode, so the tests above
+        # never touch the built distribution. This does.
+        run: |
+          uv venv /tmp/verify
+          uv pip install --python /tmp/verify/bin/python dist/*.whl
+          /tmp/verify/bin/sqlstep --version
+          /tmp/verify/bin/python -c "import sqlstep; print(sqlstep.__version__)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dist
