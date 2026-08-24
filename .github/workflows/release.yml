@@ -74,17 +74,22 @@ jobs:
     # The environment gates this on a human approval and on the ref being a tag.
     environment: pypi
     permissions:
-      # Trusted publishing: a short-lived OIDC credential scoped to this repo,
-      # this workflow and this environment. No stored token to leak, and it is
-      # what lets the action attach PEP 740 provenance attestations, which an
-      # API token cannot produce.
-      id-token: write
-      # Needed by the action to sign the attestations.
-      attestations: write
       contents: read
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dist
           path: dist/
+      # TEMPORARY: token auth, only to create the project on PyPI. A trusted
+      # publisher cannot be registered for a project that does not exist yet,
+      # and there is no API for the registration, so the first upload has to
+      # carry a credential.
+      #
+      # Once this has published, register the trusted publisher and put the
+      # OIDC block back: it needs no stored secret and it is the only way to get
+      # PEP 740 provenance attestations, which a token cannot produce.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          # Not available under token auth; left explicit so the reason is on record.
+          attestations: false
