@@ -16,6 +16,9 @@ import re
 #: A trigger or a PL/pgSQL block opens a body that contains its own semicolons.
 _BLOCK_OPEN = re.compile(r"\bBEGIN\b", re.IGNORECASE)
 _BLOCK_CLOSE = re.compile(r"\bEND\b", re.IGNORECASE)
+#: Inside a body, these also open something that an END closes. Without them a
+#: CASE inside a trigger closes the trigger early and the statement is cut in half.
+_NESTED_OPEN = re.compile(r"\b(CASE|IF|LOOP)\b", re.IGNORECASE)
 #: Statements after which a bare BEGIN starts a body rather than a transaction.
 _BODY_INTRO = re.compile(
     r"\bCREATE\s+(OR\s+REPLACE\s+)?(TRIGGER|FUNCTION|PROCEDURE)\b", re.IGNORECASE
@@ -41,6 +44,9 @@ def split(script: str) -> list[str]:
         if char == "/" and rest.startswith("/*"):
             end = script.find("*/", index + 2)
             index = length if end == -1 else end + 2
+            # A space in place of the comment, so `select/* c */1` does not
+            # become `select1`.
+            current.append(" ")
             continue
         if char in "'\"":
             closing = _string_end(script, index, char)
@@ -58,7 +64,8 @@ def split(script: str) -> list[str]:
 
         word = _word_at(script, index)
         if word:
-            if _opens_body(script, index, word):
+            opens = _opens_body(script, index, word) or (depth and _NESTED_OPEN.fullmatch(word))
+            if opens:
                 depth += 1
             elif depth and _BLOCK_CLOSE.fullmatch(word):
                 depth -= 1

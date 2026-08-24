@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 from sqlstep.drivers import Applied, Driver
 from sqlstep.errors import ChecksumMismatch, MigrationFailed, SqlstepError
-from sqlstep.migrations import Migration
+from sqlstep.migrations import Migration, version_order
 
 
 @dataclass
@@ -68,9 +68,8 @@ def status(driver: Driver, migrations: Sequence[Migration]) -> Status:
     return result
 
 
-def _order(version: str) -> tuple[int, str]:
-    """Sort key that puts 10 after 9 rather than after 1."""
-    return (len(version), version)
+#: Ordering lives in migrations.py so the runner and discovery cannot disagree.
+_order = version_order
 
 
 def up(
@@ -102,21 +101,41 @@ def up(
 
     done: list[Migration] = []
     with driver.lock(lock_timeout):
-        # Re-read inside the lock: another process may have applied some of these
-        # between the status call and the lock being granted.
-        fresh = {row.version for row in driver.applied()}
         for migration in chosen:
-            if migration.version in fresh:
+            applied = _apply_one(driver, migration, migration.up, forward=True)
+            if applied is None:
                 continue
-            try:
-                elapsed = driver.apply(migration, migration.up)
-            except Exception as error:
-                raise MigrationFailed(migration.version, migration.name, error) from error
-            driver.record(migration, elapsed)
             done.append(migration)
             if on_step is not None:
-                on_step(migration, elapsed)
+                on_step(migration, applied)
     return done
+
+
+def _apply_one(driver: Driver, migration: Migration, sql: str, *, forward: bool) -> int | None:
+    """Run one migration and its bookkeeping in a single transaction.
+
+    Both halves together, because a schema change that is durable while its row
+    is missing means the next run tries to apply it again and fails on a table
+    that already exists. Doing them in one transaction also lets the
+    already-applied check happen inside it, which is what stops two concurrent
+    migrators from both deciding they should run the same migration.
+
+    A migration marked no-transaction cannot have this. Its bookkeeping is
+    written straight after instead, and the gap between them is the price of
+    running statements the database will not put in a transaction.
+    """
+    with driver.atomic(not migration.no_transaction):
+        if forward == driver.is_applied(migration.version):
+            return None
+        try:
+            elapsed = driver.apply(migration, sql)
+        except Exception as error:
+            raise MigrationFailed(migration.version, migration.name, error) from error
+        if forward:
+            driver.record(migration, elapsed)
+        else:
+            driver.forget(migration.version)
+        return elapsed
 
 
 def down(
@@ -166,13 +185,17 @@ def down(
 
     done: list[Migration] = []
     with driver.lock(lock_timeout):
+        # Re-read inside the lock. Another process may have rolled some of these
+        # back between the status call above and the lock being granted, and
+        # running a down section twice is not something to find out about later.
+        current = {row.version for row in driver.applied()}
         for migration in chosen:
+            if migration.version not in current:
+                continue
             assert migration.down is not None
-            try:
-                elapsed = driver.apply(migration, migration.down)
-            except Exception as error:
-                raise MigrationFailed(migration.version, migration.name, error) from error
-            driver.forget(migration.version)
+            elapsed = _apply_one(driver, migration, migration.down, forward=False)
+            if elapsed is None:
+                continue
             done.append(migration)
             if on_step is not None:
                 on_step(migration, elapsed)
@@ -196,11 +219,15 @@ def baseline(driver: Driver, migrations: Sequence[Migration], version: str) -> l
 
 
 def accept_checksums(driver: Driver, migrations: Sequence[Migration]) -> list[Migration]:
-    """Rewrite recorded checksums to match the files. Only for cosmetic edits."""
+    """Rewrite recorded checksums to match the files. Only for cosmetic edits.
+
+    Updated in place rather than deleted and re-inserted, so when the migration
+    actually ran and how long it took survive. This command is for a cosmetic
+    edit; rewriting the history alongside it would not be.
+    """
     state = status(driver, migrations)
     for migration, _row in state.mismatched:
-        driver.forget(migration.version)
-        driver.record(migration, 0)
+        driver.update_checksum(migration.version, migration.checksum)
     return [migration for migration, _ in state.mismatched]
 
 

@@ -33,7 +33,11 @@ from sqlstep.errors import MigrationError
 
 UP = re.compile(r"^\s*--\s*migrate:up\b(.*)$", re.IGNORECASE)
 DOWN = re.compile(r"^\s*--\s*migrate:down\b(.*)$", re.IGNORECASE)
-NO_TRANSACTION = re.compile(r"--\s*sqlstep:no-transaction\b", re.IGNORECASE)
+#: Anchored to its own comment line. Matching anywhere would let a SQL string
+#: literal containing the text turn off the transaction for the migration.
+NO_TRANSACTION = re.compile(
+    r"^[ \t]*--[ \t]*sqlstep:no-transaction[ \t]*$", re.IGNORECASE | re.MULTILINE
+)
 FILENAME = re.compile(r"^(?P<version>\d+)[_-](?P<name>.+)\.sql$")
 
 
@@ -92,7 +96,11 @@ def parse(text: str, path: Path) -> tuple[str, str | None, bool]:
         )
     up = "\n".join(up_lines).strip()
     if not up:
-        raise MigrationError(f"{path} has an empty '-- migrate:up' section")
+        raise MigrationError(
+            f"{path} has an empty '-- migrate:up' section. If this is a migration "
+            "that was just created, write the SQL into it. An empty migration would "
+            "be recorded as applied while doing nothing."
+        )
     down = "\n".join(down_lines).strip() or None
     return up, down, bool(NO_TRANSACTION.search(text))
 
@@ -126,22 +134,36 @@ def discover(directory: Path) -> list[Migration]:
     for path in sorted(directory.glob("*.sql")):
         found.append(load(path))
 
-    seen: dict[str, Path] = {}
+    # Keyed by numeric value, so 0002 and 2 are recognised as the same version
+    # rather than silently becoming two migrations that sort unpredictably.
+    seen: dict[int, Path] = {}
     for migration in found:
-        if migration.version in seen:
+        number = version_order(migration.version)[0]
+        if number in seen:
             raise MigrationError(
-                f"two migrations share version {migration.version}: "
-                f"{seen[migration.version].name} and {migration.path.name}. "
+                f"two migrations share version {number}: "
+                f"{seen[number].name} and {migration.path.name}. "
                 "Applying them in a stable order across machines would be luck."
             )
-        seen[migration.version] = migration.path
-    # Sorted numerically, so 10 comes after 9 rather than after 1.
-    found.sort(key=lambda m: (len(m.version), m.version))
+        seen[number] = migration.path
+    found.sort(key=lambda m: version_order(m.version))
     return found
 
 
-def next_version(existing: list[Migration]) -> str:
-    """A timestamp version, which does not collide when two people write one on the same day."""
+def version_order(version: str) -> tuple[int, str]:
+    """Sort key by numeric value, so 10 comes after 9 and 0002 equals 2.
+
+    Sorting by digit count would put ``10_a.sql`` before ``0002_b.sql`` on a
+    fresh database, which is a migration order nobody chose.
+    """
+    try:
+        return (int(version), version)
+    except ValueError:  # pragma: no cover - FILENAME only matches digits
+        return (0, version)
+
+
+def next_version() -> str:
+    """A UTC timestamp, which does not collide when two people write one on the same day."""
     return datetime.now(tz=timezone.utc).strftime("%Y%m%d%H%M%S")
 
 
@@ -155,14 +177,30 @@ TEMPLATE = """\
 
 
 def create(directory: Path, name: str) -> Path:
-    """Write a new empty migration and return its path."""
+    """Write a new empty migration and return its path.
+
+    Created exclusively, and the version is bumped on collision. The timestamp
+    has one-second resolution, so two ``sqlstep new`` calls in the same second
+    would otherwise pick the same path and the second would overwrite the first.
+    """
     slug = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
     if not slug:
         raise MigrationError(f"{name!r} does not give a usable filename")
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{next_version(discover_safe(directory))}_{slug}.sql"
-    path.write_text(TEMPLATE, encoding="utf-8")
-    return path
+
+    taken = {version_order(m.version)[0] for m in discover_safe(directory)}
+    number = int(next_version())
+    while True:
+        if number not in taken:
+            path = directory / f"{number}_{slug}.sql"
+            try:
+                with path.open("x", encoding="utf-8") as handle:
+                    handle.write(TEMPLATE)
+            except FileExistsError:
+                number += 1
+                continue
+            return path
+        number += 1
 
 
 def discover_safe(directory: Path) -> list[Migration]:

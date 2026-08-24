@@ -151,3 +151,15 @@ def test_out_of_order_can_be_allowed(project, capsys):
     capsys.readouterr()
     assert main(["up", "--allow-out-of-order"]) == 0
     assert "applied 0000_earlier" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("steps", ["0", "-1"])
+def test_a_non_positive_step_count_is_rejected(project, steps):
+    with pytest.raises(SystemExit):
+        main(["down", "--steps", steps])
+
+
+def test_new_honours_json(project, capsys):
+    assert main(["--json", "new", "add widgets"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"].endswith("add_widgets.sql")

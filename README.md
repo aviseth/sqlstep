@@ -92,12 +92,28 @@ so a migrator that is killed halfway does not leave the lock held forever. The p
 re-read after the lock is granted, since the other process may have applied some of it while this
 one was waiting.
 
-On SQLite there is one writer at a time by design, and an immediate transaction is the lock.
+On SQLite there is one writer at a time by design. Each migration runs in a `BEGIN IMMEDIATE`
+transaction, which takes the write lock up front rather than on first write, so a second migrator
+waits there instead of discovering the conflict halfway through.
 
-There is a test that starts two migrators simultaneously against the same Postgres database and
-asserts exactly one applies the migration and neither errors. It found a real bug: `CREATE TABLE
-IF NOT EXISTS` is not race-safe in PostgreSQL, and two processes creating the bookkeeping table at
-the same moment can still collide on the system catalogue.
+Either way, the check for whether a migration has already been applied happens *inside* that
+transaction, which is what actually stops two processes deciding they should both run it.
+
+There are tests that start two migrators simultaneously, against Postgres and against one SQLite
+file, and assert each migration is applied exactly once with neither process erroring. The
+Postgres one found a real bug: `CREATE TABLE IF NOT EXISTS` is not race-safe in PostgreSQL, and
+two processes creating the bookkeeping table at the same moment can still collide on the system
+catalogue.
+
+## The bookkeeping row goes in with the migration
+
+A migration and the row recording it are written in one transaction. If they were separate, a
+process killed between the two would leave a durable schema change with no record of it, and the
+next `up` would try to apply the same migration again and fail on a table that already exists.
+
+A migration marked `no-transaction` cannot have this, by definition. Its row is written straight
+afterwards, and the gap between them is the price of running statements the database will not put
+in a transaction.
 
 ## Transactions
 
@@ -179,11 +195,12 @@ Every command takes `--json`, `--url` and `--dir`.
 | --- | --- |
 | `-- migrate:up` | Required. Everything until the next marker is the migration |
 | `-- migrate:down` | Optional. Without it the migration cannot be rolled back |
-| `-- sqlstep:no-transaction` | Run this migration outside a transaction |
+| `-- sqlstep:no-transaction` | Run this migration outside a transaction. Must be on its own comment line |
 
 Filenames are a number, an underscore, then a name: `0001_create_widgets.sql`. `sqlstep new` uses
 a UTC timestamp, which does not collide when two people write a migration on the same day.
-Versions sort numerically, so 10 comes after 9 rather than after 1.
+Versions sort by numeric value, so 10 comes after 9, and `0002` and `2` are the same version
+rather than two that sort unpredictably.
 
 ## How it compares
 

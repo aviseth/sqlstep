@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -37,13 +39,23 @@ def sqlite_url(tmp_path: Path) -> str:
 
 
 @pytest.fixture
-def postgres_url() -> str:
-    """A clean schema for each test, so they cannot interfere with each other."""
+def postgres_url(request: pytest.FixtureRequest) -> Iterator[str]:
+    """A private schema per test, dropped afterwards.
+
+    Deliberately not `DROP SCHEMA public CASCADE`: somebody will eventually point
+    SQLSTEP_TEST_DSN at a database that matters, and a test suite is not entitled
+    to delete it. A per-test schema also means these can run in parallel.
+    """
     if not POSTGRES_DSN:
         pytest.skip("no SQLSTEP_TEST_DSN")
     import psycopg
 
+    name = "sqlstep_test_" + uuid.uuid4().hex[:12]
     with psycopg.connect(POSTGRES_DSN, autocommit=True) as conn:
-        conn.execute("DROP SCHEMA IF EXISTS public CASCADE")
-        conn.execute("CREATE SCHEMA public")
-    return POSTGRES_DSN
+        conn.execute(f'CREATE SCHEMA "{name}"')
+    separator = "&" if "?" in POSTGRES_DSN else "?"
+    try:
+        yield f"{POSTGRES_DSN}{separator}options=-csearch_path%3D{name}"
+    finally:
+        with psycopg.connect(POSTGRES_DSN, autocommit=True) as conn:
+            conn.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')

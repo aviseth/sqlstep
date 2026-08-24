@@ -49,3 +49,10 @@ def test_a_second_connection_sees_what_the_first_recorded(tmp_path):
     with open_driver(url) as driver:
         driver.ensure_table()
         assert [r.version for r in driver.applied()] == ["0001"]
+
+
+@pytest.mark.parametrize("table", ["9nope", "has-dash", "has space", "x; drop table users", ""])
+def test_a_table_name_that_is_not_an_identifier_is_refused_at_the_driver(table):
+    """open_driver is public, so config validation alone is not enough."""
+    with pytest.raises(UnsupportedDatabase, match="not a usable table name"):
+        open_driver("app.db", table)

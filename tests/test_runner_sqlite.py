@@ -218,9 +218,73 @@ def test_down_refuses_while_a_row_has_no_file(project):
         down(driver, discover(directory))
 
 
-def test_execution_time_is_recorded(project):
+def test_the_recorded_time_is_the_time_the_runner_measured(project):
+    """Asserting >= 0 would pass even if record always stored zero."""
+    directory, url = project
+    seen = {}
+    with open_driver(url) as driver:
+        up(driver, discover(directory), on_step=lambda m, ms: seen.__setitem__(m.version, ms))
+    with open_driver(url) as driver:
+        recorded = {r.version: r.execution_ms for r in driver.applied()}
+    assert recorded == seen
+
+
+def test_the_bookkeeping_row_lands_with_the_migration_not_after_it(project):
+    """A durable schema change with no row makes the next run re-apply and fail."""
+    directory, url = project
+    migrations = discover(directory)
+    with open_driver(url) as driver:
+        driver.ensure_table()
+        with pytest.raises(MigrationFailed):
+            # The second statement fails, so neither the table nor its row
+            # should survive.
+            broken = migrations[0]
+            broken.up = "create table widget (id integer primary key);\nthis is not sql;"
+            up(driver, [broken])
+    assert "widget" not in tables(url)
+    with open_driver(url) as driver:
+        assert driver.applied() == []
+
+
+def test_two_processes_migrating_the_same_sqlite_file_apply_it_once(project, tmp_path):
+    import subprocess
+    import sys
+    import textwrap
+
+    directory, url = project
+    script = textwrap.dedent(
+        f"""
+        from pathlib import Path
+        from sqlstep.drivers import open_driver
+        from sqlstep.migrations import discover
+        from sqlstep.runner import up
+
+        with open_driver({url!r}) as driver:
+            print(len(up(driver, discover(Path({str(directory)!r})))))
+        """
+    )
+    procs = [
+        subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
+        for _ in range(2)
+    ]
+    counts = sorted(int(p.communicate()[0].strip() or -1) for p in procs)
+    assert all(p.returncode == 0 for p in procs)
+    assert sum(counts) == 2, "each migration should be applied exactly once in total"
+    with open_driver(url) as driver:
+        assert len(driver.applied()) == 2
+
+
+def test_accepting_a_checksum_keeps_when_it_was_applied(project):
     directory, url = project
     with open_driver(url) as driver:
-        up(driver, discover(directory))
+        up(driver, discover(directory), target="0001")
     with open_driver(url) as driver:
-        assert all(r.execution_ms >= 0 for r in driver.applied())
+        before = {r.version: (r.applied_at, r.execution_ms) for r in driver.applied()}
+
+    path = directory / "0001_widgets.sql"
+    path.write_text(path.read_text() + "\n-- cosmetic\n")
+    with open_driver(url) as driver:
+        accept_checksums(driver, discover(directory))
+    with open_driver(url) as driver:
+        after = {r.version: (r.applied_at, r.execution_ms) for r in driver.applied()}
+    assert before == after

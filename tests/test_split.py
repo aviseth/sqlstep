@@ -90,3 +90,28 @@ def test_an_unterminated_string_does_not_hang():
 
 def test_an_unterminated_block_comment_does_not_hang():
     assert split("/* never closed") == []
+
+
+def test_removing_a_block_comment_leaves_a_separator():
+    """Dropping the bytes outright would turn `select/* c */1` into `select1`."""
+    assert split("select/* comment */1;") == ["select 1"]
+
+
+def test_a_case_inside_a_trigger_does_not_close_the_body_early():
+    sql = (
+        "create trigger t after insert on a begin "
+        "update b set n = case when n > 0 then 1 else 2 end; "
+        "end;\nselect 1;"
+    )
+    parts = split(sql)
+    assert len(parts) == 2, parts
+    assert "case when" in parts[0]
+    assert parts[1] == "select 1"
+
+
+def test_a_nested_if_inside_a_function_body():
+    sql = (
+        "create function f() returns void as $$ begin "
+        "if true then raise notice 'x'; end if; end; $$ language plpgsql;\nselect 1;"
+    )
+    assert len(split(sql)) == 2

@@ -19,7 +19,8 @@ jobs:
       postgres:
         # The locking and transactional-DDL behaviour cannot be checked against
         # SQLite, and those are the two things a migration tool has to get right.
-        image: postgres:17-alpine
+        # Pinned by digest: a retag upstream should not change what CI runs.
+        image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
         env:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: sqlstep

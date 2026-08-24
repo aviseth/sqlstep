@@ -25,7 +25,7 @@ pytestmark = [pytest.mark.postgres, needs_postgres]
 def tables(url):
     with open_driver(url) as driver:
         rows = driver.connection.execute(
-            "select tablename from pg_tables where schemaname = 'public' order by tablename"
+            "select tablename from pg_tables where schemaname = current_schema() order by tablename"
         ).fetchall()
     return [r[0] for r in rows]
 
@@ -129,3 +129,38 @@ def test_the_applied_table_survives_a_reconnect(migrations_dir, postgres_url):
         up(driver, discover(migrations_dir))
     with open_driver(postgres_url) as driver:
         assert [r.version for r in status(driver, discover(migrations_dir)).applied] == ["0001"]
+
+
+def test_a_no_transaction_migration_runs_its_statements_separately(migrations_dir, postgres_url):
+    """Sent as one message they would share an implicit transaction, which is
+    exactly what the directive asks not to happen."""
+    write(migrations_dir, "0001_t.sql", "create table widget (id serial primary key, name text);")
+    write(
+        migrations_dir,
+        "0002_two.sql",
+        "create index concurrently widget_name on widget (name);\n"
+        "create index concurrently widget_id_name on widget (id, name);",
+        header="-- sqlstep:no-transaction\n",
+    )
+    with open_driver(postgres_url) as driver:
+        up(driver, discover(migrations_dir))
+    with open_driver(postgres_url) as driver:
+        names = {
+            r[0]
+            for r in driver.connection.execute(
+                "select indexname from pg_indexes where tablename = 'widget'"
+            ).fetchall()
+        }
+    assert {"widget_name", "widget_id_name"} <= names
+
+
+def test_the_bookkeeping_row_is_committed_with_the_migration(migrations_dir, postgres_url):
+    write(migrations_dir, "0001_ok.sql", "create table widget (id serial primary key);")
+    write(migrations_dir, "0002_bad.sql", "create table other (id int);\nthis is not sql;")
+    with open_driver(postgres_url) as driver, pytest.raises(MigrationFailed):
+        up(driver, discover(migrations_dir))
+
+    with open_driver(postgres_url) as driver:
+        applied = [r.version for r in driver.applied()]
+    assert applied == ["0001"], "the failed migration must leave no row"
+    assert "other" not in tables(postgres_url), "and no schema change"

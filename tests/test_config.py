@@ -45,10 +45,17 @@ def test_a_missing_url_says_where_to_put_one(tmp_path, monkeypatch):
         load(write(tmp_path, '[project]\nname = "x"\n')).url()
 
 
-def test_a_table_name_that_is_not_an_identifier_is_rejected(tmp_path):
+@pytest.mark.parametrize(
+    "table", ["x; drop table users", "9migrations", "has-a-dash", "has space", ""]
+)
+def test_a_table_name_that_is_not_an_identifier_is_rejected(tmp_path, table):
     """The table name goes into SQL unparameterised, since identifiers cannot be bound."""
-    with pytest.raises(ConfigError, match="letters, digits and underscores"):
-        load(write(tmp_path, '[tool.sqlstep]\ntable = "x; drop table users"\n'))
+    with pytest.raises(ConfigError):
+        load(write(tmp_path, f'[tool.sqlstep]\ntable = "{table}"\n'))
+
+
+def test_a_leading_underscore_is_a_fine_table_name(tmp_path):
+    assert load(write(tmp_path, '[tool.sqlstep]\ntable = "_migrations"\n')).table == "_migrations"
 
 
 def test_an_empty_directory_is_rejected(tmp_path):

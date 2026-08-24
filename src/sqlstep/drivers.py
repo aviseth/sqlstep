@@ -52,6 +52,16 @@ class Driver(ABC):
     supports_transactional_ddl: bool = True
 
     def __init__(self, url: str, table: str = DEFAULT_TABLE) -> None:
+        from sqlstep.config import is_identifier
+
+        # Checked here as well as at config load, because open_driver and the
+        # concrete constructors are public and both drivers interpolate this
+        # into SQL without quoting.
+        if not is_identifier(table):
+            raise UnsupportedDatabase(
+                f"{table!r} is not a usable table name: letters, digits and "
+                "underscores, starting with a letter or underscore"
+            )
         self.url = url
         self.table = table
 
@@ -81,16 +91,29 @@ class Driver(ABC):
     def forget(self, version: str) -> None: ...
 
     @abstractmethod
-    def run(self, sql: str, *, in_transaction: bool) -> None: ...
+    def run_sql(self, sql: str) -> None:
+        """Execute a script. Transaction handling is the caller's business."""
+
+    @abstractmethod
+    def update_checksum(self, version: str, checksum: str) -> None:
+        """Change a recorded checksum, leaving applied_at and execution_ms alone."""
+
+    @contextmanager
+    @abstractmethod
+    def atomic(self, enabled: bool = True) -> Iterator[None]:
+        """Run the body in one transaction, so a failure undoes all of it."""
 
     @contextmanager
     @abstractmethod
     def lock(self, timeout: float = 30.0) -> Iterator[None]: ...
 
+    def is_applied(self, version: str) -> bool:
+        return any(row.version == version for row in self.applied())
+
     def apply(self, migration: Migration, sql: str) -> int:
         """Run one migration's SQL and return how long it took, in milliseconds."""
         started = time.perf_counter()
-        self.run(sql, in_transaction=not migration.no_transaction)
+        self.run_sql(sql)
         return int((time.perf_counter() - started) * 1000)
 
 
@@ -147,41 +170,54 @@ class SQLiteDriver(Driver):
     def forget(self, version: str) -> None:
         self._conn.execute(f"DELETE FROM {self.table} WHERE version = ?", (version,))
 
-    def run(self, sql: str, *, in_transaction: bool) -> None:
-        statements = split(sql)
-        if in_transaction:
-            self._conn.execute("BEGIN")
-        try:
-            for statement in statements:
-                self._conn.execute(statement)
-        except Exception:
-            if in_transaction:
-                self._conn.execute("ROLLBACK")
-            raise
-        if in_transaction:
-            self._conn.execute("COMMIT")
+    def run_sql(self, sql: str) -> None:
+        for statement in split(sql):
+            self._conn.execute(statement)
+
+    def update_checksum(self, version: str, checksum: str) -> None:
+        self._conn.execute(
+            f"UPDATE {self.table} SET checksum = ? WHERE version = ?", (checksum, version)
+        )
 
     @contextmanager
-    def lock(self, timeout: float = 30.0) -> Iterator[None]:
-        """SQLite allows one writer, so an immediate transaction is the lock."""
-        deadline = time.monotonic() + timeout
+    def atomic(self, enabled: bool = True) -> Iterator[None]:
+        """One immediate transaction, which is also SQLite's mutual exclusion.
+
+        ``BEGIN IMMEDIATE`` takes the write lock straight away rather than on
+        first write, so a second migrator blocks here instead of discovering the
+        conflict halfway through. Combined with the applied-check the runner does
+        inside this block, that is what stops two processes applying the same
+        migration.
+        """
+        if not enabled:
+            yield
+            return
+        deadline = time.monotonic() + 30.0
         while True:
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
                 break
             except sqlite3.OperationalError as error:
                 if "locked" not in str(error).lower() or time.monotonic() > deadline:
-                    raise LockUnavailable(
-                        f"could not lock {self.path} within {timeout:g}s: {error}"
-                    ) from error
-                time.sleep(0.1)
+                    raise LockUnavailable(f"could not lock {self.path}: {error}") from error
+                time.sleep(0.05)
         try:
-            # Released immediately: each migration manages its own transaction,
-            # and holding this one would nest them.
-            self._conn.execute("COMMIT")
             yield
-        finally:
-            pass
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
+
+    @contextmanager
+    def lock(self, timeout: float = 30.0) -> Iterator[None]:
+        """No separate lock on SQLite.
+
+        SQLite permits one writer, and each migration's ``BEGIN IMMEDIATE`` takes
+        that writer lock for as long as the migration and its bookkeeping row
+        take. A second lock around the whole run would have to be held across
+        those transactions, which SQLite has no way to express.
+        """
+        yield
 
 
 class PostgresDriver(Driver):
@@ -250,12 +286,26 @@ class PostgresDriver(Driver):
     def forget(self, version: str) -> None:
         self.connection.execute(f"DELETE FROM {self.table} WHERE version = %s", (version,))
 
-    def run(self, sql: str, *, in_transaction: bool) -> None:
-        if not in_transaction:
-            self.connection.execute(sql)
+    def run_sql(self, sql: str) -> None:
+        # One statement per execute. Sending several in a single message uses
+        # the simple query protocol, which wraps them in one implicit
+        # transaction, and that is exactly what a no-transaction migration is
+        # asking not to happen.
+        for statement in split(sql):
+            self.connection.execute(statement)
+
+    def update_checksum(self, version: str, checksum: str) -> None:
+        self.connection.execute(
+            f"UPDATE {self.table} SET checksum = %s WHERE version = %s", (checksum, version)
+        )
+
+    @contextmanager
+    def atomic(self, enabled: bool = True) -> Iterator[None]:
+        if not enabled:
+            yield
             return
         with self.connection.transaction():
-            self.connection.execute(sql)
+            yield
 
     @contextmanager
     def lock(self, timeout: float = 30.0) -> Iterator[None]:

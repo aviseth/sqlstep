@@ -111,3 +111,58 @@ def test_text_before_the_first_marker_is_ignored(migrations_dir):
     path = migrations_dir / "0001_a.sql"
     path.write_text("-- a note about this migration\n-- migrate:up\nselect 1;\n")
     assert load(path).up == "select 1;"
+
+
+def test_versions_sort_by_number_not_by_digit_count(migrations_dir):
+    """0002 must come before 10, whatever their lengths are."""
+    write(migrations_dir, "10_later.sql", "select 1;")
+    write(migrations_dir, "0002_earlier.sql", "select 2;")
+    assert [m.version for m in discover(migrations_dir)] == ["0002", "10"]
+
+
+def test_two_versions_that_are_the_same_number_are_rejected(migrations_dir):
+    write(migrations_dir, "0002_one.sql", "select 1;")
+    write(migrations_dir, "2_two.sql", "select 2;")
+    with pytest.raises(MigrationError, match="share version"):
+        discover(migrations_dir)
+
+
+def test_the_directive_is_only_read_from_its_own_comment_line(migrations_dir):
+    """A SQL literal containing the text must not turn the transaction off."""
+    path = write(
+        migrations_dir,
+        "0001_a.sql",
+        "insert into notes values ('-- sqlstep:no-transaction');",
+    )
+    assert load(path).no_transaction is False
+
+
+def test_the_directive_is_read_when_it_is_a_comment_line(migrations_dir):
+    path = write(
+        migrations_dir, "0001_a.sql", "select 1;", header="  -- sqlstep:no-transaction  \n"
+    )
+    assert load(path).no_transaction is True
+
+
+def test_create_does_not_overwrite_an_existing_migration(migrations_dir):
+    first = create(migrations_dir, "same name")
+    second = create(migrations_dir, "same name")
+    assert first != second
+    assert first.is_file() and second.is_file()
+
+
+def test_create_picks_a_version_nothing_else_is_using(migrations_dir):
+    from sqlstep.migrations import next_version, version_order
+
+    write(migrations_dir, f"{next_version()}_taken.sql", "select 1;")
+    created = create(migrations_dir, "new one")
+
+    versions = [version_order(p.name.split("_")[0])[0] for p in migrations_dir.glob("*.sql")]
+    assert len(versions) == len(set(versions))
+    assert created.is_file()
+
+
+def test_an_untouched_new_migration_says_what_to_do_with_it(migrations_dir):
+    created = create(migrations_dir, "not filled in yet")
+    with pytest.raises(MigrationError, match="write the SQL into it"):
+        load(created)

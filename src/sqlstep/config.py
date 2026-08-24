@@ -12,6 +12,7 @@ connection string with a password in it does not belong in a repository.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,13 @@ from sqlstep.errors import SqlstepError
 DEFAULT_DIRECTORY = "migrations"
 DEFAULT_URL_ENV = "DATABASE_URL"
 DEFAULT_TABLE = "schema_migrations"
+
+#: A plain SQL identifier: what can be interpolated without quoting.
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def is_identifier(name: str) -> bool:
+    return bool(_IDENTIFIER.match(name))
 
 
 class ConfigError(SqlstepError):
@@ -77,11 +85,12 @@ def load(path: Path | None = None) -> Config:
         return value
 
     table = text("table", DEFAULT_TABLE)
-    if not table.replace("_", "").isalnum():
+    if not is_identifier(table):
         # The table name goes into SQL unparameterised, because identifiers
         # cannot be bound. Restricting it is what makes that safe.
         raise ConfigError(
-            f"{pyproject}: table must be letters, digits and underscores, not {table!r}"
+            f"{pyproject}: table must be a plain identifier, letters digits and "
+            f"underscores starting with a letter or underscore, not {table!r}"
         )
 
     return Config(

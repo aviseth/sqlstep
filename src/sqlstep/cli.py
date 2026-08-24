@@ -21,6 +21,14 @@ examples:
 """
 
 
+def _positive(value: str) -> int:
+    """argparse type for a count that has to be at least one."""
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, not {number}")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sqlstep",
@@ -47,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--lock-timeout", type=float, default=30.0)
 
     down = sub.add_parser("down", help="roll back the most recent migrations")
-    down.add_argument("--steps", type=int, default=1)
+    down.add_argument("--steps", type=_positive, default=1)
     down.add_argument("--to", dest="target", help="roll back until this version is current")
     down.add_argument("--dry-run", action="store_true")
     down.add_argument("--lock-timeout", type=float, default=30.0)
@@ -92,6 +100,9 @@ def _new(args: argparse.Namespace) -> int:
     from sqlstep.migrations import create
 
     path = create(_config(args).directory, args.name)
+    if args.json:
+        print(json.dumps({"created": str(path)}, indent=2))
+        return 0
     print(f"wrote {path}")
     return 0
 
