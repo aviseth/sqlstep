@@ -48,6 +48,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          # No cache on the job that builds what gets published. A restored
+          # cache can contain wheels built earlier, and this is the one job
+          # where what goes in the artifact should come only from this checkout.
+          enable-cache: false
       - name: the tag has to match the version being built
         run: |
           tag="${GITHUB_REF_NAME#v}"
